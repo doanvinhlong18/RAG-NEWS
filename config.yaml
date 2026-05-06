@@ -1,0 +1,108 @@
+# ============================================================
+# RAG-NEWS Pipeline Configuration
+# RTX 3050 Ti 4GB VRAM — Memory-Optimized Settings
+# ============================================================
+
+# --- Paths ---
+paths:
+  data_dir: "outputs/pipeline"
+  index_dir: "outputs/pipeline"
+  models_dir: "models"
+  results_dir: "results"
+  cache_dir: "cache"
+
+# --- Dataset ---
+dataset:
+  name: "trec-news-generated-queries"
+  beir_base_url: "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/"
+  source: "beir"                 # "beir" | "huggingface"
+  hf_repo: "BeIR/trec-news-generated-queries"
+  sampling:
+    enabled: true
+    ratio: 0.5
+    seed: 42
+
+# --- Chunking ---
+chunking:
+  max_tokens: 256        # Hard limit (sentence-transformers max_seq_length)
+  overlap: 32            # Token overlap between consecutive chunks
+  min_tokens: 30         # Drop chunks shorter than this
+
+# --- Models ---
+models:
+  bi_encoder_base: "sentence-transformers/all-MiniLM-L6-v2"   # 80MB, 384-dim
+  bi_encoder_finetuned: "models/bi_encoder"
+  cross_encoder_base: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  cross_encoder_finetuned: "models/cross_encoder"
+  generator: "google/flan-t5-base"                             # ~990MB, fp16 ~500MB
+
+# --- Indexing ---
+indexing:
+  batch_size: 32           # Encoding batch size (reduce to 16 if OOM)
+  embedding_dim: 384       # MiniLM-L6-v2 output dimension
+  faiss_index_type: "flat" # "flat" (IndexFlatIP) or "hnsw" (IndexHNSWFlat)
+  hnsw_m: 32               # HNSW connectivity (only used if faiss_index_type=hnsw)
+  normalize_embeddings: true
+  use_gpu_for_encoding: true  # Falls back to CPU on OOM
+
+# --- Bi-Encoder Training ---
+bi_encoder_training:
+  enabled: true
+  base_model: "sentence-transformers/all-MiniLM-L6-v2"
+  batch_size: 8
+  gradient_accumulation_steps: 4    # Effective batch = 32
+  num_epochs: 3
+  warmup_ratio: 0.1
+  max_seq_length: 256
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  use_amp: true                    # fp16 via sentence-transformers native API
+  output_path: "models/bi_encoder"
+  max_train_samples: 100000         # Cap for memory / speed
+  eval_split: 0.1                  # Fraction of queries for IR evaluation
+  evaluation_steps: 1000
+
+# --- Cross-Encoder Training ---
+cross_encoder_training:
+  enabled: false            # Pretrained ms-marco already strong on news; opt-in
+  base_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  batch_size: 4
+  gradient_accumulation_steps: 4   # Effective batch = 16
+  num_epochs: 2
+  warmup_ratio: 0.1
+  max_seq_length: 256
+  learning_rate: 1.0e-5
+  hard_neg_top_k: 20
+  use_amp: true
+  output_path: "models/cross_encoder"
+  max_train_samples: 5000
+
+# --- Retrieval ---
+retrieval:
+  bm25_top_k: 100
+  dense_top_k: 100
+  rrf_k: 60                        # RRF constant (higher = smoother blend)
+  bi_encoder_rerank_top_k: 30      # Stage-1: 100 → 30
+  cross_encoder_rerank_top_k: 5    # Stage-2: 30 → 5
+  ce_score_threshold: 0.0          # Min CE score to include (0 = no filter)
+  use_finetuned_bi_encoder: false  # Switch to true after bi_encoder_training
+  use_finetuned_cross_encoder: false
+  dense_query_batch_size: 32       # Batch size for dense query encoding
+  query_expansion:
+    enabled: true
+    n_variants: 3                  # Total queries including original
+    use_t5_rewriter: false         # Rule-based by default (fast, no VRAM)
+
+# --- Evaluation ---
+evaluation:
+  k_values: [1, 3, 5, 10, 100]
+  max_queries: 500                 # Limit for faster iteration (null = all)
+  batch_size: 64                   # Dense encoding batch during eval
+
+# --- RAG Inference ---
+rag_inference:
+  context_top_k: 5                 # Final documents sent to generator
+  max_context_tokens: 450          # Tokens from context (leaves room for Q+A)
+  max_answer_tokens: 256
+  generator_batch_size: 1
+  generator_device: "auto"         # "auto" | "cuda" | "cpu"

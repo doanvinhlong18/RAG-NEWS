@@ -1,0 +1,8 @@
+.venv
+
+.idea
+outputs
+models
+data
+checkpoints
+cache
