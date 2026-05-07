@@ -341,7 +341,7 @@ def train_bi_encoder(
         epochs=tr_cfg["num_epochs"],
         warmup_steps=warmup_steps,
         output_path=output_path,
-        evaluation_steps=tr_cfg["evaluation_steps"],
+        evaluation_steps=tr_cfg.get("evaluation_steps", 1000),
         save_best_model=True,
         use_amp=(device == "cuda" and tr_cfg["use_amp"]),       # fp16 on GPU
         optimizer_params={"lr": tr_cfg["learning_rate"]},

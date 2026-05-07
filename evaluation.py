@@ -84,7 +84,7 @@ def chunk_to_doc_results(
 # ---------------------------------------------------------------------------
 def bm25_retrieve_all(
     queries: Dict[str, str],
-    chunks: List[Dict],
+    meta_path: str,
     bm25_path: str,
     top_k: int = 100,
 ) -> Dict[str, Dict[str, float]]:
@@ -96,6 +96,8 @@ def bm25_retrieve_all(
     stops = set(stopwords.words("english"))
     with open(bm25_path, "rb") as f:
         bm25 = pickle.load(f)
+    with open(meta_path, "rb") as f:
+        metadata = pickle.load(f)
 
     results = {}
     for qid, query in tqdm(queries.items(), desc="BM25 eval", unit="queries"):
@@ -104,7 +106,7 @@ def bm25_retrieve_all(
         top_n  = min(top_k, len(scores))
         top_ix = np.argpartition(scores, -top_n)[-top_n:]
         top_ix = top_ix[np.argsort(-scores[top_ix])]
-        results[qid] = {chunks[i]["chunk_id"]: float(scores[i]) for i in top_ix}
+        results[qid] = {metadata[int(i)]["chunk_id"]: float(scores[i]) for i in top_ix}
 
     return results
 
@@ -114,7 +116,6 @@ def bm25_retrieve_all(
 # ---------------------------------------------------------------------------
 def dense_retrieve_all(
     queries: Dict[str, str],
-    chunks: List[Dict],
     faiss_path: str,
     meta_path: str,
     model_name: str,

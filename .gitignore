@@ -6,3 +6,6 @@ models
 data
 checkpoints
 cache
+
+.env
+.env.example

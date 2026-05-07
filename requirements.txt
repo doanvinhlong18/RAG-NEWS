@@ -36,9 +36,13 @@ pickle5>=0.0.11; python_version < "3.8"
 # --- HuggingFace Hub ---
 huggingface_hub>=0.21.0
 
-# --- Optional: API-based LLM fallback ---
-# openai>=1.0.0
-# groq>=0.4.0
+# --- Groq API (OpenAI-compatible) ---
+openai>=1.30.0                 # OpenAI SDK used as Groq client (compatible endpoint)
+httpx>=0.27.0                  # HTTP transport layer required by openai SDK
+python-dotenv>=1.0.0           # Load GROQ_API_KEY from .env
+
+# --- Web Server ---
+flask>=3.0.0
 
 # ============================================================
 # Installation Notes:

@@ -34,7 +34,23 @@ models:
   bi_encoder_finetuned: "models/bi_encoder"
   cross_encoder_base: "cross-encoder/ms-marco-MiniLM-L-6-v2"
   cross_encoder_finetuned: "models/cross_encoder"
-  generator: "google/flan-t5-base"                             # ~990MB, fp16 ~500MB
+  generator: "llama-3.3-70b-versatile"
+
+# --- Generator (LLM for answer synthesis via Groq) ---
+generator:
+  provider: "groq"
+  primary_model: "llama-3.3-70b-versatile"
+  fallback_models:
+    - "qwen-qwq-32b"
+    - "mixtral-8x7b-32768"
+  temperature: 0.1
+  top_p: 0.9
+  max_tokens: 256
+  timeout_seconds: 60
+  max_retries: 3
+  streaming: false
+  api_key_env: "GROQ_API_KEY"
+  base_url: "https://api.groq.com/openai/v1"
 
 # --- Indexing ---
 indexing:
@@ -64,18 +80,19 @@ bi_encoder_training:
 
 # --- Cross-Encoder Training ---
 cross_encoder_training:
-  enabled: false            # Pretrained ms-marco already strong on news; opt-in
+  enabled: true            # Pretrained ms-marco already strong on news; opt-in
   base_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
   batch_size: 4
   gradient_accumulation_steps: 4   # Effective batch = 16
-  num_epochs: 2
+  num_epochs: 3
   warmup_ratio: 0.1
   max_seq_length: 256
   learning_rate: 1.0e-5
   hard_neg_top_k: 20
   use_amp: true
   output_path: "models/cross_encoder"
-  max_train_samples: 5000
+  max_train_samples: 100000
+  evaluation_steps: 1000
 
 # --- Retrieval ---
 retrieval:
@@ -84,9 +101,9 @@ retrieval:
   rrf_k: 60                        # RRF constant (higher = smoother blend)
   bi_encoder_rerank_top_k: 30      # Stage-1: 100 → 30
   cross_encoder_rerank_top_k: 5    # Stage-2: 30 → 5
-  ce_score_threshold: 0.0          # Min CE score to include (0 = no filter)
-  use_finetuned_bi_encoder: false  # Switch to true after bi_encoder_training
-  use_finetuned_cross_encoder: false
+  ce_score_threshold: 0         # Min CE score to include (0 = no filter)
+  use_finetuned_bi_encoder: true  # Switch to true after bi_encoder_training
+  use_finetuned_cross_encoder: true # Switch to true after cross_encoder_training
   dense_query_batch_size: 32       # Batch size for dense query encoding
   query_expansion:
     enabled: true
@@ -101,8 +118,10 @@ evaluation:
 
 # --- RAG Inference ---
 rag_inference:
-  context_top_k: 5                 # Final documents sent to generator
-  max_context_tokens: 450          # Tokens from context (leaves room for Q+A)
+  context_top_k: 5                 # Top docs sent to generator
+  max_context_tokens: 800
   max_answer_tokens: 256
+  max_chunk_words: 150             # Enough context per chunk without overflow
+  max_answer_sentences: 4          # Hard trim generated answer to this many sentences
   generator_batch_size: 1
   generator_device: "auto"         # "auto" | "cuda" | "cpu"

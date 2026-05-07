@@ -29,13 +29,16 @@ import re
 import pickle
 import logging
 import argparse
-from functools import lru_cache
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 import yaml
 import numpy as np
 
-from multi_query_retriever import expand_query, retrieve_multi_query
+from multi_query_retriever import (
+    QueryIntentClassifier,
+    expand_query_with_intent,
+    retrieve_multi_query,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -51,76 +54,43 @@ def load_config(path: str = "config.yaml") -> dict:
 # ---------------------------------------------------------------------------
 class QueryProcessor:
     """
-    Lightweight query rewriter and multi-query expander.
-    Uses rule-based templates by default (fast, no VRAM).
-    Optional: T5-based rewriter (set use_t5_rewriter=True in config).
+    Intent-aware query rewriter and multi-query expander.
+
+    Classifies the query intent (statement / biography / event / causal /
+    opinion / general) then generates intent-specific expansion variants.
+    This fixes known retrieval weaknesses:
+      - Statement queries now include subject+topic keyword variants.
+      - Biography queries now include background/role keyword variants.
     """
 
-    NEWS_TEMPLATES = [
-        "{query}",
-        "news about {query}",
-        "latest updates on {query}",
-        "{query} recent developments",
-        "what happened with {query}",
-    ]
-
     def __init__(self, n_variants: int = 3, use_t5: bool = False):
-        self.n_variants = n_variants
-        self.use_t5     = use_t5
-        self._t5_model  = None
-        self._t5_tok    = None
-
-    def _load_t5(self):
-        """Lazily load T5 rewriter (castorini/doc2query-t5-base-msmarco)."""
-        if self._t5_model is None:
-            from transformers import T5ForConditionalGeneration, T5Tokenizer
-            logger.info("Loading T5 query rewriter …")
-            model_name = "castorini/doc2query-t5-base-msmarco"
-            self._t5_tok   = T5Tokenizer.from_pretrained(model_name)
-            self._t5_model = T5ForConditionalGeneration.from_pretrained(model_name)
-            self._t5_model.eval()
+        self.n_variants  = n_variants
+        self.use_t5      = use_t5          # reserved — T5 rewriter not used
+        self.classifier  = QueryIntentClassifier()
+        self.last_intent = "general"       # set after each classify_and_expand call
 
     def rewrite(self, query: str) -> str:
-        """Light cleaning: strip extra whitespace, fix capitalization."""
-        q = re.sub(r"\s+", " ", query).strip()
-        # Ensure question format
-        if not q.endswith("?") and len(q.split()) <= 8:
-            # Short query: might be a keyword query — leave as-is
-            pass
-        return q
+        """Light cleaning: collapse whitespace."""
+        return re.sub(r"\s+", " ", query).strip()
+
+    def classify_and_expand(self, query: str) -> tuple:
+        """
+        Classify query intent and return intent-aware expansion variants.
+
+        Returns:
+            (intent: str, variants: List[str])
+        """
+        query = self.rewrite(query)
+        intent = self.classifier.classify(query)
+        self.last_intent = intent
+        variants = expand_query_with_intent(query, intent, self.n_variants)
+        logger.debug(f"Intent={intent} | variants={variants}")
+        return intent, variants
 
     def expand(self, query: str) -> List[str]:
-        """Generate n_variants queries using templates (or T5 if enabled)."""
-        query = self.rewrite(query)
-
-        if self.use_t5:
-            logger.warning("T5 rewriter disabled for low-resource mode; using rule-based expansion.")
-            return self._expand_rules(query)
-
-        return self._expand_rules(query)
-
-    def _expand_rules(self, query: str) -> List[str]:
-        return expand_query(query, n_variants=self.n_variants)
-
-    def _expand_t5(self, query: str) -> List[str]:
-        """T5 diverse beam search for query expansion."""
-        import torch
-        inputs = self._t5_tok(query, return_tensors="pt", max_length=64, truncation=True)
-        with torch.no_grad():
-            outputs = self._t5_model.generate(
-                **inputs,
-                max_new_tokens=64,
-                num_beams=self.n_variants * 2,
-                num_beam_groups=self.n_variants,
-                diversity_penalty=1.0,
-                num_return_sequences=self.n_variants,
-                early_stopping=True,
-            )
-        variants = [self._t5_tok.decode(o, skip_special_tokens=True) for o in outputs]
-        # Always include original query first
-        if query not in variants:
-            variants = [query] + variants[: self.n_variants - 1]
-        return variants[: self.n_variants]
+        """Backward-compatible expand — uses intent-aware expansion internally."""
+        _, variants = self.classify_and_expand(query)
+        return variants
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +108,7 @@ class HybridRetriever:
         faiss_path: str,
         meta_path: str,
         bi_encoder_model: str,
+        corpus_path: str = "",
         max_seq_length: int = 256,
         top_k: int = 100,
         rrf_k: int = 60,
@@ -147,6 +118,7 @@ class HybridRetriever:
         self.bm25_path        = bm25_path
         self.faiss_path       = faiss_path
         self.meta_path        = meta_path
+        self.corpus_path      = corpus_path
         self.bi_encoder_model = bi_encoder_model
         self.max_seq_length   = max_seq_length
         self.top_k            = top_k
@@ -154,14 +126,58 @@ class HybridRetriever:
         self.use_gpu          = use_gpu
         self.dense_query_batch_size = dense_query_batch_size
 
-        self._bm25       = None
-        self._faiss      = None
-        self._metadata   = None
-        self._encoder    = None
-        self._device     = None
-        self._stop_words = None
+        self._bm25         = None
+        self._faiss        = None
+        self._metadata     = None
+        self._encoder      = None
+        self._device       = None
+        self._stop_words   = None
+        self._chunk_lookup = None  # chunk_id → {chunk_text, title}
 
     # ── Lazy Loaders ─────────────────────────────────────────────────────────
+
+    def _get_chunk_lookup(self) -> dict:
+        """Build chunk_id → {chunk_text, title} from corpus_chunks.jsonl (lazy).
+        Caches result as a pickle next to the JSONL so subsequent runs skip JSON parsing.
+        """
+        if self._chunk_lookup is not None:
+            return self._chunk_lookup
+
+        import json
+
+        if not self.corpus_path or not os.path.exists(self.corpus_path):
+            logger.warning(f"corpus_chunks.jsonl not found at '{self.corpus_path}'. chunk_text will be empty.")
+            self._chunk_lookup = {}
+            return self._chunk_lookup
+
+        cache_path = self.corpus_path.replace(".jsonl", "_lookup.pkl")
+
+        if os.path.exists(cache_path):
+            logger.info(f"Loading chunk lookup cache from {cache_path} …")
+            with open(cache_path, "rb") as f:
+                self._chunk_lookup = pickle.load(f)
+            logger.info(f"Chunk lookup loaded: {len(self._chunk_lookup):,} entries")
+            return self._chunk_lookup
+
+        logger.info(f"Loading chunk text lookup from {self.corpus_path} …")
+        lookup = {}
+        with open(self.corpus_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                lookup[rec["chunk_id"]] = {
+                    "chunk_text": rec.get("chunk_text", ""),
+                    "title":      rec.get("title", ""),
+                }
+
+        logger.info(f"Saving chunk lookup cache to {cache_path} …")
+        with open(cache_path, "wb") as f:
+            pickle.dump(lookup, f)
+
+        self._chunk_lookup = lookup
+        logger.info(f"Chunk lookup loaded: {len(lookup):,} entries")
+        return self._chunk_lookup
 
     def _get_bm25(self):
         if self._bm25 is None:
@@ -320,10 +336,14 @@ class HybridRetriever:
             return [{"chunk_id": cid, "rrf_score": s} for cid, s in fused]
 
         # Enrich with full chunk data
-        cid_to_meta = {c["chunk_id"]: c for c in metadata.values()}
+        cid_to_meta    = {c["chunk_id"]: c for c in metadata.values()}
+        chunk_lookup   = self._get_chunk_lookup()   # chunk_id → {chunk_text, title}
         results = []
         for cid, rrf_score in fused:
-            chunk = cid_to_meta.get(cid, {})
+            chunk = dict(cid_to_meta.get(cid, {}))
+            # chunk_metadata.pkl may not have chunk_text — fall back to corpus JSONL
+            if not chunk.get("chunk_text") and cid in chunk_lookup:
+                chunk.update(chunk_lookup[cid])
             results.append({**chunk, "rrf_score": rrf_score})
 
         return results
@@ -456,7 +476,6 @@ class RetrievalPipeline:
     def __init__(self, config_path: str = "config.yaml"):
         self.cfg = load_config(config_path)
         ret_cfg  = self.cfg["retrieval"]
-        idx_cfg  = self.cfg["indexing"]
 
         data_dir  = self.cfg["paths"]["data_dir"]
         index_dir = self.cfg["paths"]["index_dir"]
@@ -483,6 +502,7 @@ class RetrievalPipeline:
             bm25_path   = os.path.join(index_dir, "bm25.pkl"),
             faiss_path  = os.path.join(index_dir, "faiss.index"),
             meta_path   = os.path.join(index_dir, "chunk_metadata.pkl"),
+            corpus_path = os.path.join(data_dir, "corpus_chunks.jsonl"),
             bi_encoder_model = bi_model,
             max_seq_length   = self.cfg["bi_encoder_training"]["max_seq_length"],
             top_k  = ret_cfg["bm25_top_k"],
@@ -506,14 +526,16 @@ class RetrievalPipeline:
 
     def retrieve(self, query: str, verbose: bool = False) -> List[Dict]:
         """Full pipeline: query → top-K reranked documents."""
-        # Stage 0: Query expansion
+        # Stage 0: Intent classification + query expansion
         if self.cfg["retrieval"]["query_expansion"]["enabled"]:
-            queries = self.query_proc.expand(query)
+            intent, queries = self.query_proc.classify_and_expand(query)
         else:
+            intent = "general"
             queries = [query]
+            self.query_proc.last_intent = intent
 
         if verbose:
-            logger.info(f"Query variants: {queries}")
+            logger.info(f"Intent: {intent} | Query variants: {queries}")
 
         # Stage 1: Hybrid retrieval (BM25 + Dense → RRF)
         candidates = self.hybrid.retrieve(queries)
