@@ -84,26 +84,34 @@ cross_encoder_training:
   base_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
   batch_size: 4
   gradient_accumulation_steps: 4   # Effective batch = 16
-  num_epochs: 3
+  num_epochs: 2                    # reduced from 3 — fewer passes = less forgetting
   warmup_ratio: 0.1
   max_seq_length: 256
-  learning_rate: 1.0e-5
-  hard_neg_top_k: 20
+  learning_rate: 5.0e-6            # halved from 1e-5 — slower updates preserve MS MARCO knowledge
+  hard_neg_top_k: 50               # expanded from 20 — wider candidate pool for stratified sampling
   use_amp: true
   output_path: "models/cross_encoder"
   max_train_samples: 100000
   evaluation_steps: 1000
+  max_train_queries: 22000
+  # --- Fix-1: knowledge distillation via teacher CE soft scores ---
+  use_teacher_scores: true         # score pairs with base CE → continuous labels instead of 0/1
+  # --- Fix-3: stratified negative sampling ---
+  neg_per_pos: 7                   # expanded from 4 — more negatives across the difficulty spectrum
+  skip_top_k: 2                    # reduced from 5 — rank 0-1 skipped as false negatives, rank 2+ used
+  # --- Fix-4: layer freezing to prevent catastrophic forgetting ---
+  freeze_first_n_layers: 4         # freeze bottom 4 transformer layers; only fine-tune top layers
 
 # --- Retrieval ---
 retrieval:
   bm25_top_k: 100
   dense_top_k: 100
   rrf_k: 60                        # RRF constant (higher = smoother blend)
-  bi_encoder_rerank_top_k: 30      # Stage-1: 100 → 30
-  cross_encoder_rerank_top_k: 5    # Stage-2: 30 → 5
+  bi_encoder_rerank_top_k: 80      # Stage-1: 100 → 30
+  cross_encoder_rerank_top_k: 50    # Stage-2: 30 → 5
   ce_score_threshold: 0         # Min CE score to include (0 = no filter)
-  use_finetuned_bi_encoder: true  # Switch to true after bi_encoder_training
-  use_finetuned_cross_encoder: true # Switch to true after cross_encoder_training
+  use_finetuned_bi_encoder: false  # Switch to true after bi_encoder_training
+  use_finetuned_cross_encoder: false # Switch to true after cross_encoder_training
   dense_query_batch_size: 32       # Batch size for dense query encoding
   query_expansion:
     enabled: true

@@ -7,9 +7,24 @@ Evaluates:
   1. BM25 only
   2. Dense (FAISS) only
   3. Hybrid (BM25 + Dense + RRF)
-  4. Hybrid + Multi-Query
-  5. MultiHybrid + Bi-Encoder Rerank
-  6. Hybrid + Bi-Encoder + Cross-Encoder Rerank (final pipeline)
+  4. HybridMultiQuery (BM25 + Dense + RRF + query expansion)
+  5. HybridMultiQuery + Cross-Encoder Rerank  ← production pipeline
+
+Thay đổi kiến trúc so với bản cũ:
+  [ARCH] Bỏ hoàn toàn bước Bi-Encoder rerank trung gian.
+         CE rerank thẳng từ HybridMultiQuery pool (top 100).
+         Lý do: Dense NDCG@10 = 0.289 < BM25 NDCG@10 = 0.369 cho thấy
+         bi-encoder chưa học được domain. Rerank theo embedding yếu hơn
+         BM25 làm giảm chất lượng ở mọi metric. CE không bị ảnh hưởng
+         vì đọc toàn text, không phụ thuộc embedding quality.
+  [FIX-1] CE top_k_out nâng từ 5 → 25, tránh cap cứng tại k=5
+           khiến NDCG/Recall/MAP ở k>5 bằng nhau hoàn toàn.
+  [FIX-2] Query encoding luôn gọi .float() dù model lưu ở half(),
+           tránh cosine similarity drift trên query vectors ngắn.
+  [FIX-3] rrf_merge dùng rrf_fusion từ multi_query_retriever,
+           không copy-paste inline như bản gốc.
+  [FIX-4] compute_precision skip query không có relevant doc
+           thay vì append 0, tránh inflate denominator.
 
 Metrics:
   - NDCG@{1,3,5,10,100}
@@ -18,22 +33,9 @@ Metrics:
   - Precision@{1,3,5,10,100}
   - MRR@10
 
-Fixes applied vs original:
-  [FIX-1] Bi-encoder rerank top_k_out raised from 30 → 80 to avoid
-          over-pruning candidates before cross-encoder.
-  [FIX-2] Cross-encoder top_k_out raised from 5 → 25 so that NDCG/Recall
-          metrics at k > 5 are no longer artificially capped at the same value.
-  [FIX-3] Bi-encoder rerank now uses a dot-product score guard: chunks that
-          score below a minimum similarity threshold are dropped before
-          passing to CE, instead of blindly truncating by rank.
-  [FIX-4] FAISS half-precision encoding isolated — encoder.half() is only
-          applied for the initial index build; query encoding uses float32
-          to avoid cosine-similarity drift on short query vectors.
-  [FIX-5] rrf_merge helper de-duplicated (was copy-pasted inline); now
-          shared with multi-query stage via rrf_fusion import.
-  [FIX-6] Queries with no qrel entries are now skipped consistently in
-          compute_precision (previously returned 0 for missing qids rather
-          than skipping, inflating the denominator).
+Config keys mới (thêm vào config.yaml nếu muốn override):
+  retrieval.ce_rerank_top_k_in  : số chunk đưa vào CE (default 100)
+  retrieval.cross_encoder_rerank_top_k : số chunk giữ lại sau CE (default 25)
 
 Run:
   python evaluation.py
@@ -50,7 +52,6 @@ from typing import Dict, List, Tuple
 import yaml
 import numpy as np
 from tqdm import tqdm
-import torch
 
 from multi_query_retriever import expand_query, rrf_fusion
 
@@ -81,8 +82,7 @@ def chunk_to_doc_results(
     chunk_to_doc: Dict[str, str],
 ) -> Dict[str, Dict[str, float]]:
     """
-    Map chunk-level retrieval scores to document-level by taking the max score
-    per document per query.
+    Map chunk-level scores → doc-level bằng cách lấy max score mỗi doc mỗi query.
 
     Args:
         chunk_results : {qid: {chunk_id: score}}
@@ -112,7 +112,7 @@ def bm25_retrieve_all(
     stops: set,
     top_k: int = 100,
 ) -> Dict[str, Dict[str, float]]:
-    """BM25 retrieval for all queries. Returns {qid: {chunk_id: score}}."""
+    """BM25 retrieval cho tất cả queries. Returns {qid: {chunk_id: score}}."""
     from data_pipeline.utils import tokenize_for_bm25
 
     results = {}
@@ -141,22 +141,16 @@ def dense_retrieve_all(
     top_k: int = 100,
 ) -> Dict[str, Dict[str, float]]:
     """
-    Dense FAISS retrieval for all queries. Returns {qid: {chunk_id: score}}.
+    Dense FAISS retrieval. Returns {qid: {chunk_id: score}}.
 
-    [FIX-4] Query vectors are encoded in float32 regardless of whether the
-    encoder was cast to half() for index construction. This prevents cosine
-    similarity drift on short query vectors.
+    [FIX-2] encoder.float() trước khi encode để tránh cosine drift
+    khi model đang ở half() precision trên GPU.
     """
     qids    = list(queries.keys())
     q_texts = [queries[q] for q in qids]
 
     logger.info(f"Encoding {len(q_texts)} queries (float32) …")
-
-    # [FIX-4] Temporarily move to float32 for query encoding
-    original_dtype = next(encoder.parameters()).dtype
-    encoder_fp32 = encoder.float() if original_dtype != float else encoder
-
-    q_embs = encoder_fp32.encode(
+    q_embs = encoder.float().encode(
         q_texts,
         batch_size=batch_size,
         show_progress_bar=True,
@@ -181,27 +175,21 @@ def dense_retrieve_all(
 # ---------------------------------------------------------------------------
 
 def compute_ndcg(qrels: Dict, results: Dict, k: int) -> float:
-    """Compute NDCG@k averaged over queries."""
     ndcgs = []
     for qid in qrels:
         if qid not in results or not results[qid]:
             ndcgs.append(0.0)
             continue
-        relevant = qrels[qid]
-        ranked   = sorted(results[qid].items(), key=lambda x: -x[1])[:k]
-        dcg, idcg = 0.0, 0.0
+        relevant     = qrels[qid]
+        ranked       = sorted(results[qid].items(), key=lambda x: -x[1])[:k]
         ideal_scores = sorted(relevant.values(), reverse=True)[:k]
-        for rank, (doc_id, _) in enumerate(ranked, start=1):
-            rel = relevant.get(doc_id, 0)
-            dcg += rel / np.log2(rank + 1)
-        for rank, rel in enumerate(ideal_scores, start=1):
-            idcg += rel / np.log2(rank + 1)
+        dcg  = sum(relevant.get(d, 0) / np.log2(r + 1) for r, (d, _) in enumerate(ranked, 1))
+        idcg = sum(v / np.log2(r + 1) for r, v in enumerate(ideal_scores, 1))
         ndcgs.append(dcg / idcg if idcg > 0 else 0.0)
     return float(np.mean(ndcgs))
 
 
 def compute_recall(qrels: Dict, results: Dict, k: int) -> float:
-    """Compute Recall@k averaged over queries."""
     recalls = []
     for qid in qrels:
         relevant = set(d for d, s in qrels[qid].items() if s > 0)
@@ -210,15 +198,12 @@ def compute_recall(qrels: Dict, results: Dict, k: int) -> float:
         if qid not in results or not results[qid]:
             recalls.append(0.0)
             continue
-        retrieved = set(
-            d for d, _ in sorted(results[qid].items(), key=lambda x: -x[1])[:k]
-        )
+        retrieved = set(d for d, _ in sorted(results[qid].items(), key=lambda x: -x[1])[:k])
         recalls.append(len(relevant & retrieved) / len(relevant))
     return float(np.mean(recalls)) if recalls else 0.0
 
 
 def compute_map(qrels: Dict, results: Dict, k: int) -> float:
-    """Compute MAP@k averaged over queries."""
     aps = []
     for qid in qrels:
         relevant = set(d for d, s in qrels[qid].items() if s > 0)
@@ -229,41 +214,32 @@ def compute_map(qrels: Dict, results: Dict, k: int) -> float:
             continue
         ranked   = sorted(results[qid].items(), key=lambda x: -x[1])[:k]
         num_hits, ap = 0, 0.0
-        for rank, (doc_id, _) in enumerate(ranked, start=1):
+        for rank, (doc_id, _) in enumerate(ranked, 1):
             if doc_id in relevant:
                 num_hits += 1
                 ap += num_hits / rank
-        ap /= min(len(relevant), k)
-        aps.append(ap)
+        aps.append(ap / min(len(relevant), k))
     return float(np.mean(aps)) if aps else 0.0
 
 
 def compute_precision(qrels: Dict, results: Dict, k: int) -> float:
     """
-    Compute Precision@k averaged over queries.
-
-    [FIX-6] Queries absent from results OR absent from qrels are both
-    skipped so they do not inflate the denominator.
+    [FIX-4] Skip queries không có relevant doc thay vì append 0.
     """
     precs = []
     for qid in qrels:
-        # [FIX-6] skip queries with no relevant docs (undefined precision)
         relevant = set(d for d, s in qrels[qid].items() if s > 0)
         if not relevant:
-            continue
+            continue  # [FIX-4]
         if qid not in results:
             precs.append(0.0)
             continue
-        retrieved = [
-            d for d, _ in sorted(results[qid].items(), key=lambda x: -x[1])[:k]
-        ]
-        hits = sum(1 for d in retrieved if d in relevant)
-        precs.append(hits / k)
+        retrieved = [d for d, _ in sorted(results[qid].items(), key=lambda x: -x[1])[:k]]
+        precs.append(sum(1 for d in retrieved if d in relevant) / k)
     return float(np.mean(precs)) if precs else 0.0
 
 
 def compute_mrr(qrels: Dict, results: Dict, k: int = 10) -> float:
-    """Compute MRR@k averaged over queries."""
     mrrs = []
     for qid in qrels:
         if qid not in results:
@@ -271,11 +247,7 @@ def compute_mrr(qrels: Dict, results: Dict, k: int = 10) -> float:
             continue
         relevant = set(d for d, s in qrels[qid].items() if s > 0)
         ranked   = sorted(results[qid].items(), key=lambda x: -x[1])[:k]
-        rr = 0.0
-        for rank, (doc_id, _) in enumerate(ranked, start=1):
-            if doc_id in relevant:
-                rr = 1.0 / rank
-                break
+        rr = next((1.0 / r for r, (d, _) in enumerate(ranked, 1) if d in relevant), 0.0)
         mrrs.append(rr)
     return float(np.mean(mrrs))
 
@@ -283,7 +255,6 @@ def compute_mrr(qrels: Dict, results: Dict, k: int = 10) -> float:
 def evaluate_results(
     qrels: Dict, results: Dict, k_values: List[int], name: str
 ) -> Dict:
-    """Compute all metrics for a retrieval result dict."""
     metrics = {}
     for k in k_values:
         metrics[f"NDCG@{k}"]      = compute_ndcg(qrels, results, k)
@@ -301,9 +272,8 @@ def evaluate_results(
 
 
 # ---------------------------------------------------------------------------
-# RRF merge helper (shared)
-# [FIX-5] Extracted from inline copy-paste; uses rrf_fusion from
-#         multi_query_retriever for consistency.
+# RRF merge helper
+# [FIX-3] Dùng rrf_fusion từ multi_query_retriever.
 # ---------------------------------------------------------------------------
 
 def rrf_merge(
@@ -312,128 +282,9 @@ def rrf_merge(
     rrf_k: int,
     top_k: int,
 ) -> Dict[str, float]:
-    """Merge BM25 and Dense results via Reciprocal Rank Fusion."""
     bm25_list  = sorted(bm25_r.items(),  key=lambda x: -x[1])
     dense_list = sorted(dense_r.items(), key=lambda x: -x[1])
-    fused = rrf_fusion([bm25_list, dense_list], k=rrf_k, top_k=top_k)
-    return {cid: score for cid, score in fused}
-
-
-# ---------------------------------------------------------------------------
-# Bi-Encoder Rerank
-# ---------------------------------------------------------------------------
-
-def bi_encoder_rerank_results(
-    queries: Dict[str, str],
-    chunk_results: Dict[str, Dict[str, float]],
-    chunks: Dict[str, str],
-    encoder,
-    top_k_in: int = 100,
-    top_k_out: int = 80,           # [FIX-1] raised from 30 → 80
-    min_score: float = 0.0,        # [FIX-3] score guard threshold
-) -> Dict[str, Dict[str, float]]:
-    """
-    Apply bi-encoder reranking to retrieved chunks.
-
-    [FIX-1] top_k_out default raised to 80 so the cross-encoder receives
-            enough candidates to produce meaningful Recall@k for k > 30.
-    [FIX-3] Chunks scoring below min_score are dropped before passing to CE.
-            This avoids feeding clearly irrelevant passages while still
-            keeping a large candidate pool.
-    [FIX-4] Encoder is kept in float32 for query encoding.
-    """
-    qids       = [qid for qid in queries if qid in chunk_results]
-    q_texts    = [queries[qid] for qid in qids]
-
-    logger.info(f"Bi-encoder: encoding {len(q_texts)} queries (float32) …")
-    # [FIX-4] encode in float32 regardless of model storage dtype
-    q_embs_all = encoder.float().encode(
-        q_texts,
-        batch_size=64,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    )
-    q_emb_map = {qid: q_embs_all[i] for i, qid in enumerate(qids)}
-
-    reranked = {}
-    for qid in tqdm(qids, desc="Bi-encoder rerank"):
-        top_chunks = sorted(
-            chunk_results[qid].items(), key=lambda x: -x[1]
-        )[:top_k_in]
-        cids       = [cid for cid, _ in top_chunks]
-        valid_cids = [cid for cid in cids if cid in chunks]
-        texts      = [chunks[cid] for cid in valid_cids]
-
-        if not texts:
-            continue
-
-        d_embs = encoder.float().encode(
-            texts,
-            batch_size=32,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-        )
-        scores = (q_emb_map[qid] @ d_embs.T).flatten()
-
-        # [FIX-3] apply score guard before rank truncation
-        ranked = [
-            (cid, float(score))
-            for cid, score in sorted(
-                zip(valid_cids, scores.tolist()), key=lambda x: -x[1]
-            )
-            if float(score) >= min_score
-        ][:top_k_out]   # [FIX-1] now uses the larger top_k_out
-
-        reranked[qid] = {cid: score for cid, score in ranked}
-
-    return reranked
-
-
-# ---------------------------------------------------------------------------
-# Cross-Encoder Rerank
-# ---------------------------------------------------------------------------
-
-def ce_rerank_results(
-    queries: Dict[str, str],
-    chunk_results: Dict[str, Dict[str, float]],
-    chunks: Dict[str, str],
-    ce_model,
-    top_k_in: int = 80,    # [FIX-2] matches new bi-encoder top_k_out
-    top_k_out: int = 25,   # [FIX-2] raised from 5 → 25
-) -> Dict[str, Dict[str, float]]:
-    """
-    Apply cross-encoder reranking.
-
-    [FIX-2] top_k_out raised from 5 → 25. The original value of 5 caused
-            NDCG@k, Recall@k, and Precision@k for all k > 5 to be identical
-            (artificially capped), since no additional documents existed
-            beyond rank 5 in the result set.
-    """
-    reranked = {}
-    for qid in tqdm(queries, desc="CE rerank"):
-        if qid not in chunk_results:
-            continue
-        query = queries[qid]
-        top_chunks = sorted(
-            chunk_results[qid].items(), key=lambda x: -x[1]
-        )[:top_k_in]
-        cids       = [cid for cid, _ in top_chunks]
-        valid_cids = [cid for cid in cids if cid in chunks]
-        texts      = [chunks[cid] for cid in valid_cids]
-
-        if not texts:
-            continue
-
-        pairs  = [(query, t) for t in texts]
-        scores = ce_model.predict(pairs, show_progress_bar=False)
-        # scores = torch.sigmoid(torch.tensor(scores)).numpy()
-        ranked = sorted(
-            zip(valid_cids, scores.tolist()), key=lambda x: -x[1]
-        )[:top_k_out]  # [FIX-2]
-        reranked[qid] = {cid: score for cid, score in ranked}
-
-    return reranked
+    return {cid: score for cid, score in rrf_fusion([bm25_list, dense_list], k=rrf_k, top_k=top_k)}
 
 
 # ---------------------------------------------------------------------------
@@ -454,30 +305,21 @@ def multi_query_hybrid_retrieve_all(
 ) -> Dict[str, Dict[str, float]]:
     """
     Multi-query hybrid retrieval.
-
-    Per query:
-      - Expand into n_variants variants
-      - Run BM25 + Dense per variant
-      - RRF-fuse within variant, then fuse across variants
+    Mỗi query → n_variants → BM25 + Dense per variant → RRF fuse.
     """
     from data_pipeline.utils import tokenize_for_bm25
 
-    expanded = {
-        qid: expand_query(q, n_variants=n_variants)
-        for qid, q in queries.items()
-    }
+    expanded = {qid: expand_query(q, n_variants=n_variants) for qid, q in queries.items()}
 
-    flat_pairs: List[Tuple[str, int, str]] = []
-    for qid, variants in expanded.items():
-        for vidx, v in enumerate(variants):
-            flat_pairs.append((qid, vidx, v))
+    flat_pairs: List[Tuple[str, int, str]] = [
+        (qid, vidx, v)
+        for qid, variants in expanded.items()
+        for vidx, v in enumerate(variants)
+    ]
 
-    flat_texts = [v for _, _, v in flat_pairs]
-    logger.info(f"Encoding {len(flat_texts)} expanded queries (float32) …")
-
-    # [FIX-4] float32 for query encoding
-    q_embs = encoder.float().encode(
-        flat_texts,
+    logger.info(f"Encoding {len(flat_pairs)} expanded queries (float32) …")
+    q_embs = encoder.float().encode(  # [FIX-2]
+        [v for _, _, v in flat_pairs],
         batch_size=batch_size,
         show_progress_bar=True,
         normalize_embeddings=True,
@@ -487,33 +329,91 @@ def multi_query_hybrid_retrieve_all(
     logger.info("FAISS search (expanded queries) …")
     D, I = faiss_index.search(q_embs, top_k)
 
-    dense_by_qid_variant: Dict[Tuple[str, int], List[Tuple[str, float]]] = {}
+    dense_by: Dict[Tuple[str, int], List[Tuple[str, float]]] = {}
     for row, (qid, vidx, _) in enumerate(flat_pairs):
-        dense_by_qid_variant[(qid, vidx)] = [
+        dense_by[(qid, vidx)] = [
             (metadata[i]["chunk_id"], float(D[row][k]))
             for k, i in enumerate(I[row]) if i >= 0
         ]
 
     results: Dict[str, Dict[str, float]] = {}
     for qid, variants in tqdm(expanded.items(), desc="Multi-query hybrid eval"):
-        per_variant_fused: List[List[Tuple[str, float]]] = []
+        per_variant: List[List[Tuple[str, float]]] = []
         for vidx, v in enumerate(variants):
             toks   = tokenize_for_bm25(v, stops)
             scores = bm25.get_scores(toks)
             top_n  = min(top_k, len(scores))
             top_ix = np.argpartition(scores, -top_n)[-top_n:]
             top_ix = top_ix[np.argsort(-scores[top_ix])]
-            bm25_results  = [(metadata[i]["chunk_id"], float(scores[i])) for i in top_ix]
-            dense_results = dense_by_qid_variant.get((qid, vidx), [])
-            fused_variant = rrf_fusion(
-                [bm25_results, dense_results], k=rrf_k, top_k=top_k
-            )
-            per_variant_fused.append(fused_variant)
+            bm25_r  = [(metadata[i]["chunk_id"], float(scores[i])) for i in top_ix]
+            dense_r = dense_by.get((qid, vidx), [])
+            per_variant.append(rrf_fusion([bm25_r, dense_r], k=rrf_k, top_k=top_k))
 
-        fused_query = rrf_fusion(per_variant_fused, k=rrf_k, top_k=top_k)
-        results[qid] = {cid: score for cid, score in fused_query}
+        fused = rrf_fusion(per_variant, k=rrf_k, top_k=top_k)
+        results[qid] = {cid: score for cid, score in fused}
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Cross-Encoder Rerank — trực tiếp từ HybridMultiQuery pool
+# [ARCH] Không còn bi-encoder rerank trung gian.
+# ---------------------------------------------------------------------------
+
+def ce_rerank_from_hybrid(
+    queries: Dict[str, str],
+    hybrid_chunk_results: Dict[str, Dict[str, float]],
+    chunks: Dict[str, str],
+    ce_model,
+    top_k_in: int = 100,
+    top_k_out: int = 25,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Cross-encoder rerank thẳng từ hybrid retrieval pool.
+
+    [ARCH] CE nhận trực tiếp top_k_in chunks từ HybridMultiQuery,
+    bỏ qua bước bi-encoder rerank vốn làm giảm chất lượng khi
+    Dense yếu hơn BM25 trên domain cụ thể.
+
+    [FIX-1] top_k_out = 25 (trước là 5) để NDCG/Recall tại k > 5
+    không bị flatten về cùng một giá trị.
+
+    Args:
+        queries              : {qid: query_text}
+        hybrid_chunk_results : {qid: {chunk_id: rrf_score}}
+        chunks               : {chunk_id: chunk_text}
+        ce_model             : CrossEncoder instance
+        top_k_in             : số chunks lấy từ hybrid pool đưa vào CE
+        top_k_out            : số chunks giữ lại sau CE scoring
+
+    Latency note:
+        CE chạy top_k_in forward passes mỗi query. Với top_k_in=100
+        và batch_size=32, mỗi query cần ~3 batches trên GPU.
+        Nếu cần tốc độ hơn, giảm top_k_in xuống 50 và chấp nhận
+        Recall@100 thấp hơn một chút.
+    """
+    reranked: Dict[str, Dict[str, float]] = {}
+
+    for qid in tqdm(queries, desc="CE rerank (direct from hybrid)"):
+        if qid not in hybrid_chunk_results:
+            continue
+
+        query      = queries[qid]
+        top_chunks = sorted(
+            hybrid_chunk_results[qid].items(), key=lambda x: -x[1]
+        )[:top_k_in]
+
+        valid = [(cid, chunks[cid]) for cid, _ in top_chunks if cid in chunks]
+        if not valid:
+            continue
+
+        cids, texts = zip(*valid)
+        scores      = ce_model.predict([(query, t) for t in texts], show_progress_bar=False)
+        ranked      = sorted(zip(cids, scores.tolist()), key=lambda x: -x[1])[:top_k_out]
+
+        reranked[qid] = {cid: float(score) for cid, score in ranked}
+
+    return reranked
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +455,7 @@ def main(config_path: str = "config.yaml", max_queries: int = None):
 
     # ── Model selection ────────────────────────────────────────────────────
     ret_cfg = cfg["retrieval"]
+
     if ret_cfg["use_finetuned_bi_encoder"] and os.path.exists(
         cfg["models"]["bi_encoder_finetuned"]
     ):
@@ -574,7 +475,7 @@ def main(config_path: str = "config.yaml", max_queries: int = None):
     faiss_path = os.path.join(index_dir, "faiss.index")
     meta_path  = os.path.join(index_dir, "chunk_metadata.pkl")
 
-    # ── Load heavy resources once ──────────────────────────────────────────
+    # ── Load resources ─────────────────────────────────────────────────────
     import faiss
     import torch
     from sentence_transformers import SentenceTransformer
@@ -585,13 +486,13 @@ def main(config_path: str = "config.yaml", max_queries: int = None):
     max_seq = cfg["bi_encoder_training"]["max_seq_length"]
     device  = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Bi-encoder: chỉ còn dùng cho Dense retrieval và multi-query encoding.
+    # Không còn dùng để rerank.
     logger.info(f"Loading bi-encoder: {bi_model} on {device}")
     encoder = SentenceTransformer(bi_model, device=device)
     encoder.max_seq_length = max_seq
-    # [FIX-4] half() only for GPU memory saving during index build;
-    # query encoding always reverts to float32 inside each retrieve fn.
     if device == "cuda":
-        encoder = encoder.half()
+        encoder = encoder.half()  # half() để tiết kiệm VRAM; query encode sẽ gọi .float()
 
     logger.info(f"Loading cross-encoder: {ce_model_path}")
     ce_model_obj = CrossEncoder(
@@ -616,42 +517,35 @@ def main(config_path: str = "config.yaml", max_queries: int = None):
     rrf_k           = ret_cfg["rrf_k"]
     n_variants      = ret_cfg["query_expansion"]["n_variants"]
 
-    # Rerank top-k values — read from config with fixed defaults as fallback
-    # [FIX-1][FIX-2] these now default to the corrected values
-    bi_top_k_out = ret_cfg.get("bi_encoder_rerank_top_k", 80)
-    ce_top_k_out = ret_cfg.get("cross_encoder_rerank_top_k", 25)
-    bi_min_score = ret_cfg.get("bi_encoder_min_score", 0.0)  # [FIX-3]
+    # CE config — đọc từ config.yaml, fallback về giá trị đã fix
+    ce_top_k_in  = ret_cfg.get("ce_rerank_top_k_in", 100)   # chunks vào CE
+    ce_top_k_out = ret_cfg.get("cross_encoder_rerank_top_k", 25)  # chunks ra [FIX-1]
 
     logger.info(
-        f"Rerank config — bi_top_k_out={bi_top_k_out}, "
-        f"ce_top_k_out={ce_top_k_out}, bi_min_score={bi_min_score}"
+        f"Production pipeline: HybridMultiQuery (top {top_k_retrieval}) "
+        f"→ CrossEncoder (in={ce_top_k_in}, out={ce_top_k_out})"
     )
 
     # ── Stage 1: BM25 ──────────────────────────────────────────────────────
-    logger.info("\n[1/6] Evaluating BM25 …")
+    logger.info("\n[1/5] Evaluating BM25 …")
     bm25_chunk = bm25_retrieve_all(
         queries, bm25_index, metadata, stops, top_k=top_k_retrieval
     )
     bm25_doc = chunk_to_doc_results(bm25_chunk, chunk_to_doc)
-    all_metrics["BM25"] = evaluate_results(
-        qrels, bm25_doc, k_values, "BM25 Only"
-    )
+    all_metrics["BM25"] = evaluate_results(qrels, bm25_doc, k_values, "BM25 Only")
 
     # ── Stage 2: Dense ─────────────────────────────────────────────────────
-    logger.info("\n[2/6] Evaluating Dense (FAISS) …")
+    logger.info("\n[2/5] Evaluating Dense (FAISS) …")
     dense_chunk = dense_retrieve_all(
         queries, faiss_index, metadata, encoder,
         batch_size=eval_cfg["batch_size"],
         top_k=top_k_retrieval,
     )
     dense_doc = chunk_to_doc_results(dense_chunk, chunk_to_doc)
-    all_metrics["Dense"] = evaluate_results(
-        qrels, dense_doc, k_values, "Dense Only (FAISS)"
-    )
+    all_metrics["Dense"] = evaluate_results(qrels, dense_doc, k_values, "Dense Only (FAISS)")
 
-    # ── Stage 3: Hybrid (BM25 + Dense → RRF) ──────────────────────────────
-    logger.info("\n[3/6] Evaluating Hybrid (BM25 + Dense + RRF) …")
-    # [FIX-5] use shared rrf_merge instead of inline copy
+    # ── Stage 3: Hybrid ────────────────────────────────────────────────────
+    logger.info("\n[3/5] Evaluating Hybrid (BM25 + Dense + RRF) …")
     hybrid_chunk = {
         qid: rrf_merge(
             bm25_chunk.get(qid, {}),
@@ -666,8 +560,8 @@ def main(config_path: str = "config.yaml", max_queries: int = None):
         qrels, hybrid_doc, k_values, "Hybrid (BM25 + Dense + RRF)"
     )
 
-    # ── Stage 4: Hybrid (Multi-Query) ──────────────────────────────────────
-    logger.info("\n[4/6] Evaluating Hybrid (Multi-Query + RRF) …")
+    # ── Stage 4: HybridMultiQuery ──────────────────────────────────────────
+    logger.info("\n[4/5] Evaluating HybridMultiQuery …")
     multi_chunk = multi_query_hybrid_retrieve_all(
         queries, bm25_index, faiss_index, metadata, encoder, stops,
         n_variants=n_variants,
@@ -677,32 +571,22 @@ def main(config_path: str = "config.yaml", max_queries: int = None):
     )
     multi_doc = chunk_to_doc_results(multi_chunk, chunk_to_doc)
     all_metrics["HybridMultiQuery"] = evaluate_results(
-        qrels, multi_doc, k_values, "Hybrid (Multi-Query + RRF)"
+        qrels, multi_doc, k_values, "Hybrid Multi-Query + RRF"
     )
 
-    # ── Stage 5: MultiHybrid + Bi-Encoder Rerank ───────────────────────────
-    logger.info("\n[5/6] Evaluating MultiHybrid + Bi-Encoder Rerank …")
-    bi_chunk = bi_encoder_rerank_results(
-        queries, multi_chunk, chunks, encoder,
-        top_k_in=top_k_retrieval,
-        top_k_out=bi_top_k_out,    # [FIX-1]
-        min_score=bi_min_score,    # [FIX-3]
-    )
-    bi_doc = chunk_to_doc_results(bi_chunk, chunk_to_doc)
-    all_metrics["MultiHybrid+BiEncoder"] = evaluate_results(
-        qrels, bi_doc, k_values, "MultiHybrid + Bi-Encoder Rerank"
-    )
-
-    # ── Stage 6: Full Pipeline (+ Cross-Encoder) ───────────────────────────
-    logger.info("\n[6/6] Evaluating Full Pipeline (MultiHybrid + BiEncoder + CE) …")
-    ce_chunk = ce_rerank_results(
-        queries, bi_chunk, chunks, ce_model_obj,
-        top_k_in=bi_top_k_out,    # [FIX-2] CE receives full bi-encoder output
-        top_k_out=ce_top_k_out,   # [FIX-2]
+    # ── Stage 5: HybridMultiQuery → CE (Production) ────────────────────────
+    logger.info("\n[5/5] Evaluating FullPipeline (HybridMultiQuery → CE) …")
+    ce_chunk = ce_rerank_from_hybrid(
+        queries,
+        multi_chunk,
+        chunks,
+        ce_model_obj,
+        top_k_in=ce_top_k_in,
+        top_k_out=ce_top_k_out,
     )
     ce_doc = chunk_to_doc_results(ce_chunk, chunk_to_doc)
     all_metrics["FullPipeline"] = evaluate_results(
-        qrels, ce_doc, k_values, "Full Pipeline (MultiHybrid + BiEncoder + CE)"
+        qrels, ce_doc, k_values, "Full Pipeline (HybridMultiQuery → CE)"
     )
 
     # ── Save Results ───────────────────────────────────────────────────────
@@ -712,43 +596,53 @@ def main(config_path: str = "config.yaml", max_queries: int = None):
     logger.info(f"\n✅ Evaluation results saved → {results_path}")
 
     # ── Summary Table ──────────────────────────────────────────────────────
-    print(f"\n{'='*96}")
+    w = 102
+    print(f"\n{'='*w}")
     print(
-        f"{'Stage':<30} {'NDCG@10':>10} {'MAP@10':>10} "
-        f"{'Recall@100':>11} {'MRR@10':>10} {'P@5':>10}"
+        f"{'Stage':<35} {'NDCG@10':>9} {'MAP@10':>9} "
+        f"{'Recall@10':>10} {'Recall@100':>11} {'MRR@10':>9} {'P@5':>8}"
     )
-    print(f"{'='*96}")
+    print(f"{'─'*w}")
     for stage, m in all_metrics.items():
+        marker = " ◀" if stage == "FullPipeline" else ""
         print(
-            f"{stage:<30} {m.get('NDCG@10',0):>10.4f} {m.get('MAP@10',0):>10.4f} "
-            f"{m.get('Recall@100',0):>11.4f} {m.get('MRR@10',0):>10.4f} "
-            f"{m.get('Precision@5',0):>10.4f}"
+            f"{stage:<35} "
+            f"{m.get('NDCG@10',0):>9.4f} "
+            f"{m.get('MAP@10',0):>9.4f} "
+            f"{m.get('Recall@10',0):>10.4f} "
+            f"{m.get('Recall@100',0):>11.4f} "
+            f"{m.get('MRR@10',0):>9.4f} "
+            f"{m.get('Precision@5',0):>8.4f}"
+            f"{marker}"
         )
-    print(f"{'='*96}\n")
+    print(f"{'='*w}\n")
 
-    # ── Single vs Multi-Query delta ────────────────────────────────────────
-    single = all_metrics.get("Hybrid", {})
-    multi  = all_metrics.get("HybridMultiQuery", {})
-    if single and multi:
-        print("Single vs Multi-Query (Hybrid stage)")
-        for k in k_values:
-            r_s   = single.get(f"Recall@{k}", 0.0)
-            r_m   = multi.get(f"Recall@{k}", 0.0)
-            delta = r_m - r_s
-            print(f"  Recall@{k:<3}: {r_s:.4f} → {r_m:.4f} (Δ {delta:+.4f})")
-        mrr_s = single.get("MRR@10", 0.0)
-        mrr_m = multi.get("MRR@10", 0.0)
-        print(f"  MRR@10   : {mrr_s:.4f} → {mrr_m:.4f} (Δ {mrr_m - mrr_s:+.4f})")
+    # ── Pipeline delta: HybridMultiQuery → CE ─────────────────────────────
+    mq = all_metrics.get("HybridMultiQuery", {})
+    ce = all_metrics.get("FullPipeline", {})
+    if mq and ce:
+        print("HybridMultiQuery → CE Rerank delta:")
+        for metric in [f"NDCG@{k}" for k in k_values] + ["MRR@10"]:
+            v_mq  = mq.get(metric, 0.0)
+            v_ce  = ce.get(metric, 0.0)
+            delta = v_ce - v_mq
+            arrow = "↑" if delta > 0.0001 else ("↓" if delta < -0.0001 else "=")
+            print(f"  {metric:<12}: {v_mq:.4f} → {v_ce:.4f}  {arrow} ({delta:+.4f})")
 
-    # ── Rerank delta (bi → CE) ─────────────────────────────────────────────
-    bi_m  = all_metrics.get("MultiHybrid+BiEncoder", {})
-    ce_m  = all_metrics.get("FullPipeline", {})
-    if bi_m and ce_m:
-        print("\nBi-Encoder → Full Pipeline delta")
-        for metric in ["NDCG@10", "Recall@10", "MRR@10"]:
-            v_bi = bi_m.get(metric, 0.0)
-            v_ce = ce_m.get(metric, 0.0)
-            print(f"  {metric:<12}: {v_bi:.4f} → {v_ce:.4f} (Δ {v_ce - v_bi:+.4f})")
+    # ── BM25 vs Dense gap — gợi ý fine-tune ───────────────────────────────
+    bm = all_metrics.get("BM25", {})
+    dn = all_metrics.get("Dense", {})
+    if bm and dn:
+        gap = bm.get("NDCG@10", 0) - dn.get("NDCG@10", 0)
+        status = "⚠ Nên fine-tune bi-encoder" if gap > 0.05 else "✓ Gap chấp nhận được"
+        print(
+            f"\nBM25 vs Dense NDCG@10 gap: {gap:.4f}  [{status}]"
+        )
+        if gap > 0.05:
+            print(
+                "  → Fine-tune bi-encoder với hard negatives trên domain data\n"
+                "     sẽ thu hẹp gap và cho phép khôi phục bi-encoder rerank step."
+            )
 
 
 if __name__ == "__main__":

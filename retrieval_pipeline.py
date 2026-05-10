@@ -429,10 +429,14 @@ class CrossEncoderReranker:
     def _get_model(self):
         if self._model is None:
             import torch
-            from sentence_transformers.cross_encoder import CrossEncoder
+            from cross_encoder_training import SigmoidCrossEncoder
             device = "cuda" if (self.use_gpu and torch.cuda.is_available()) else "cpu"
             logger.info(f"Loading cross-encoder: {self.model_name} on {device} …")
-            self._model = CrossEncoder(self.model_name, max_length=self.max_length, device=device)
+            self._model = SigmoidCrossEncoder.load(
+                self.model_name,
+                max_length=self.max_length,
+                device=device,
+            )
         return self._model
 
     def rerank(self, query: str, candidates: List[Dict], score_threshold: float = 0.0) -> List[Dict]:
@@ -445,7 +449,9 @@ class CrossEncoderReranker:
 
         model  = self._get_model()
         pairs  = [(query, c.get("chunk_text", "")) for c in candidates]
+        import torch
         scores = model.predict(pairs, show_progress_bar=False)
+        # scores = torch.sigmoid(torch.tensor(scores)).numpy()
 
         ranked = sorted(
             zip(candidates, scores.tolist()),
