@@ -54,7 +54,7 @@ generator:
 
 # --- Indexing ---
 indexing:
-  batch_size: 32           # Encoding batch size (reduce to 16 if OOM)
+  batch_size: 512           # Encoding batch size (reduce to 16 if OOM)
   embedding_dim: 384       # MiniLM-L6-v2 output dimension
   faiss_index_type: "flat" # "flat" (IndexFlatIP) or "hnsw" (IndexHNSWFlat)
   hnsw_m: 32               # HNSW connectivity (only used if faiss_index_type=hnsw)
@@ -77,6 +77,8 @@ bi_encoder_training:
   max_train_samples: 100000         # Cap for memory / speed
   eval_split: 0.1                  # Fraction of queries for IR evaluation
   evaluation_steps: 1000
+  use_hard_negatives: true
+  max_mining_queries: 50000
 
 # --- Cross-Encoder Training ---
 cross_encoder_training:
@@ -94,13 +96,14 @@ cross_encoder_training:
   max_train_samples: 100000
   evaluation_steps: 1000
   max_train_queries: 22000
+  eval_queries: 500
   # --- Fix-1: knowledge distillation via teacher CE soft scores ---
   use_teacher_scores: true         # score pairs with base CE → continuous labels instead of 0/1
   # --- Fix-3: stratified negative sampling ---
   neg_per_pos: 7                   # expanded from 4 — more negatives across the difficulty spectrum
   skip_top_k: 2                    # reduced from 5 — rank 0-1 skipped as false negatives, rank 2+ used
   # --- Fix-4: layer freezing to prevent catastrophic forgetting ---
-  freeze_first_n_layers: 4         # freeze bottom 4 transformer layers; only fine-tune top layers
+  freeze_first_n_layers: 0         # freeze bottom 4 transformer layers; only fine-tune top layers
 
 # --- Retrieval ---
 retrieval:
@@ -110,8 +113,8 @@ retrieval:
   bi_encoder_rerank_top_k: 80      # Stage-1: 100 → 30
   cross_encoder_rerank_top_k: 50    # Stage-2: 30 → 5
   ce_score_threshold: 0         # Min CE score to include (0 = no filter)
-  use_finetuned_bi_encoder: false  # Switch to true after bi_encoder_training
-  use_finetuned_cross_encoder: false # Switch to true after cross_encoder_training
+  use_finetuned_bi_encoder: true  # Switch to true after bi_encoder_training
+  use_finetuned_cross_encoder: true # Switch to true after cross_encoder_training
   dense_query_batch_size: 32       # Batch size for dense query encoding
   query_expansion:
     enabled: true

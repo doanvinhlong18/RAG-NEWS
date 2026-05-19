@@ -320,7 +320,6 @@ header {
   <div class="logo">R</div>
   <div class="header-text">
     <h1>RAG News Demo</h1>
-    <p>Hybrid BM25 + Dense · Bi-Encoder + Cross-Encoder Rerank · flan-t5-base</p>
   </div>
   <div class="status-wrap">
     <div class="status-dot" id="status-dot"></div>
@@ -529,42 +528,33 @@ function appendErrorBubble(msg) {
 function appendAnswerBubble(data) {
   const row = el('div', 'row ai');
 
-  // Confidence badge
-  const conf  = data.confidence;
-  const confClass = conf >= 0.6 ? 'conf-high' : conf >= 0.3 ? 'conf-mid' : 'conf-low';
-  const confLabel = conf >= 0.6 ? '🟢 High' : conf >= 0.3 ? '🟡 Medium' : '🔴 Low';
-
   // Citations
   const citesHtml = (data.citations || [])
-    .map(c => `<span class="cite-tag">${escHtml(shortId(c))}</span>`).join(' ');
+    .map(c => `<span class="cite-tag">${escHtml(shortId(c))}</span>`)
+    .join(' ');
 
   // Fallback badge
   const fallbackHtml = data.fallback
-    ? `<span class="badge fallback">⚠ Fallback</span>` : '';
+    ? `<span class="badge fallback">⚠ Fallback</span>`
+    : '';
 
   // Latency
   const latHtml = data.latency_s
-    ? `<span class="badge latency">⏱ ${data.latency_s}s</span>` : '';
-
-  // Sources
-  const sourcesHtml = buildSources(data.retrieved, data.used_docs);
-  const srcCount = (data.retrieved || []).length;
+    ? `<span class="badge latency">⏱ ${data.latency_s}s</span>`
+    : '';
 
   row.innerHTML = `
     <div class="avatar">R</div>
     <div class="bubble">
       <div class="answer-text">${escHtml(data.answer)}</div>
+
       <div class="meta-bar">
-        <span class="badge ${confClass}">${confLabel} · ${(conf*100).toFixed(0)}%</span>
         ${fallbackHtml}
         ${citesHtml}
         ${latHtml}
-        <button class="sources-toggle" onclick="toggleSources(this)">
-          Sources (${srcCount}) <span class="arrow">▾</span>
-        </button>
       </div>
-      <div class="sources-panel collapsed">${sourcesHtml}</div>
-    </div>`;
+    </div>
+  `;
 
   document.getElementById('chat-inner').appendChild(row);
 }
