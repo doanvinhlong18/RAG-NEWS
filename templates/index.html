@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RAG News Demo</title>
+<style>
+/* ── Reset & base ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:        #f0f2f5;
+  --surface:   #ffffff;
+  --border:    #e0e3e8;
+  --primary:   #4f6ef7;
+  --primary-d: #3a55d4;
+  --user-bg:   #4f6ef7;
+  --user-fg:   #ffffff;
+  --ai-bg:     #ffffff;
+  --ai-fg:     #1a1a2e;
+  --muted:     #6b7280;
+  --good:      #22c55e;
+  --mid:       #f59e0b;
+  --bad:       #ef4444;
+  --radius:    14px;
+  --shadow:    0 2px 12px rgba(0,0,0,.08);
+  --font:      'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+html, body { height: 100%; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--ai-fg);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────── */
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  box-shadow: var(--shadow);
+  z-index: 10;
+}
+.logo {
+  width: 36px; height: 36px;
+  background: var(--primary);
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 18px; font-weight: 700;
+}
+.header-text h1 { font-size: 17px; font-weight: 700; }
+.header-text p  { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.status-wrap { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.status-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--mid);
+  box-shadow: 0 0 0 3px rgba(245,158,11,.25);
+  transition: background .4s, box-shadow .4s;
+}
+.status-dot.ready  { background: var(--good); box-shadow: 0 0 0 3px rgba(34,197,94,.25); }
+.status-dot.error  { background: var(--bad);  box-shadow: 0 0 0 3px rgba(239,68,68,.25); }
+.status-label { font-size: 13px; color: var(--muted); }
+
+/* ── Splash overlay (pipeline loading) ───────────────────────────────── */
+#splash {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(240,242,245,.92);
+  backdrop-filter: blur(4px);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 20px;
+}
+#splash.hidden { display: none; }
+.spinner {
+  width: 48px; height: 48px;
+  border: 4px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#splash h2 { font-size: 18px; font-weight: 600; }
+#splash p  { font-size: 14px; color: var(--muted); }
+
+/* ── Chat area ────────────────────────────────────────────────────────── */
+#chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 0;
+  scroll-behavior: smooth;
+}
+.chat-inner {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Welcome message */
+.welcome {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--muted);
+}
+.welcome .icon { font-size: 48px; margin-bottom: 12px; }
+.welcome h2    { font-size: 20px; font-weight: 600; color: var(--ai-fg); }
+.welcome p     { margin-top: 8px; font-size: 14px; line-height: 1.6; }
+.example-queries {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  justify-content: center; margin-top: 20px;
+}
+.example-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.example-btn:hover { background: #eef1ff; border-color: var(--primary); color: var(--primary); }
+
+/* ── Message rows ─────────────────────────────────────────────────────── */
+.row { display: flex; align-items: flex-end; gap: 10px; }
+.row.user  { flex-direction: row-reverse; }
+.row.ai    { flex-direction: row; }
+.avatar {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 700;
+}
+.row.user .avatar { background: var(--primary); color: #fff; }
+.row.ai   .avatar { background: #e8eaf6; color: var(--primary); }
+
+/* ── Bubbles ──────────────────────────────────────────────────────────── */
+.bubble {
+  max-width: 86%;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  line-height: 1.65;
+  font-size: 14.5px;
+  box-shadow: var(--shadow);
+  word-break: break-word;
+}
+.row.user .bubble {
+  background: var(--user-bg);
+  color: var(--user-fg);
+  border-bottom-right-radius: 4px;
+}
+.row.ai .bubble {
+  background: var(--ai-bg);
+  color: var(--ai-fg);
+  border-bottom-left-radius: 4px;
+}
+
+/* ── Answer meta bar ──────────────────────────────────────────────────── */
+.meta-bar {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px; margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 9px; border-radius: 20px;
+  font-weight: 600; font-size: 11.5px;
+}
+.badge.conf-high   { background: #dcfce7; color: #15803d; }
+.badge.conf-mid    { background: #fef9c3; color: #b45309; }
+.badge.conf-low    { background: #fee2e2; color: #b91c1c; }
+.badge.fallback    { background: #fce7f3; color: #be185d; }
+.badge.latency     { background: #f1f5f9; color: var(--muted); }
+.cite-tag {
+  background: #eef2ff; color: var(--primary);
+  padding: 2px 7px; border-radius: 6px; font-size: 11px; font-family: monospace;
+}
+
+/* ── Sources section ──────────────────────────────────────────────────── */
+.sources-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-left: auto;
+  background: none; border: 1px solid var(--border);
+  border-radius: 20px; padding: 2px 10px;
+  font-size: 12px; color: var(--muted);
+  cursor: pointer; transition: background .15s;
+}
+.sources-toggle:hover { background: var(--bg); }
+.sources-toggle .arrow { transition: transform .2s; }
+.sources-toggle.open .arrow { transform: rotate(180deg); }
+
+.sources-panel {
+  display: none;
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sources-panel.collapsed { display: none; }
+
+.source-card {
+  background: #fafbff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.source-card.used { border-left: 3px solid var(--primary); }
+.source-header {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 4px;
+}
+.source-rank {
+  font-size: 11px; font-weight: 700;
+  background: var(--bg); border-radius: 4px;
+  padding: 1px 6px; color: var(--muted);
+}
+.source-rank.used-doc { background: #eef2ff; color: var(--primary); }
+.source-id   { font-family: monospace; font-size: 11px; color: var(--muted); }
+.source-title { font-weight: 600; font-size: 13px; flex: 1; color: var(--ai-fg); }
+.ce-score {
+  font-size: 11px; font-weight: 600;
+  padding: 1px 7px; border-radius: 10px;
+  background: #f1f5f9; color: var(--muted);
+}
+.ce-score.good { background: #dcfce7; color: #15803d; }
+.ce-score.bad  { background: #fee2e2; color: #b91c1c; }
+.source-text { color: #4b5563; line-height: 1.55; }
+
+/* ── Thinking bubble ──────────────────────────────────────────────────── */
+.thinking-dots span {
+  display: inline-block;
+  width: 7px; height: 7px;
+  margin: 0 2px;
+  background: var(--muted);
+  border-radius: 50%;
+  animation: bounce .9s infinite;
+}
+.thinking-dots span:nth-child(2) { animation-delay: .15s; }
+.thinking-dots span:nth-child(3) { animation-delay: .3s; }
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  40%       { transform: translateY(-6px); }
+}
+
+/* ── Stage progress (while thinking) ─────────────────────────────────── */
+.stage-progress {
+  font-size: 12px; color: var(--muted);
+  margin-top: 8px;
+  display: flex; align-items: center; gap: 6px;
+}
+.stage-progress::before {
+  content: ''; display: inline-block;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--primary);
+  animation: pulse 1s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .3; }
+}
+
+/* ── Input bar ────────────────────────────────────────────────────────── */
+#input-bar {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 14px 20px;
+  flex-shrink: 0;
+}
+.input-inner {
+  max-width: 780px;
+  margin: 0 auto;
+  display: flex; gap: 10px; align-items: flex-end;
+}
+#query-input {
+  flex: 1;
+  resize: none;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-size: 14.5px;
+  font-family: var(--font);
+  outline: none;
+  max-height: 140px;
+  line-height: 1.5;
+  transition: border-color .2s;
+  background: var(--bg);
+}
+#query-input:focus { border-color: var(--primary); background: var(--surface); }
+#query-input:disabled { opacity: .5; }
+#send-btn {
+  width: 44px; height: 44px;
+  border: none; border-radius: 12px;
+  background: var(--primary);
+  color: #fff; font-size: 18px;
+  cursor: pointer; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .15s, transform .1s;
+}
+#send-btn:hover:not(:disabled)  { background: var(--primary-d); }
+#send-btn:active:not(:disabled) { transform: scale(.95); }
+#send-btn:disabled { opacity: .5; cursor: not-allowed; }
+.input-hint { font-size: 11px; color: var(--muted); margin-top: 5px; text-align: center; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ─────────────────────────────────────────────────────────── -->
+<header>
+  <div class="logo">R</div>
+  <div class="header-text">
+    <h1>RAG News Demo</h1>
+  </div>
+  <div class="status-wrap">
+    <div class="status-dot" id="status-dot"></div>
+    <span class="status-label" id="status-label">Loading models…</span>
+  </div>
+</header>
+
+<!-- ── Pipeline loading splash ────────────────────────────────────────── -->
+<div id="splash">
+  <div class="spinner"></div>
+  <h2>Loading RAG Pipeline</h2>
+  <p id="splash-msg">Loading FAISS index, BM25, and retrieval models…</p>
+</div>
+
+<!-- ── Chat ───────────────────────────────────────────────────────────── -->
+<div id="chat">
+  <div class="chat-inner" id="chat-inner">
+    <div class="welcome" id="welcome">
+      <div class="icon">🗞️</div>
+      <h2>Ask anything about the news</h2>
+      <p>The pipeline retrieves relevant passages from a 1.5M-chunk news corpus<br>
+         then generates a grounded answer.</p>
+      <div class="example-queries">
+        <button class="example-btn" onclick="setQuery(this)">Who won the 2016 US election?</button>
+        <button class="example-btn" onclick="setQuery(this)">What caused the 2008 financial crisis?</button>
+        <button class="example-btn" onclick="setQuery(this)">What is Brexit?</button>
+        <button class="example-btn" onclick="setQuery(this)">Who is Elon Musk?</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Input bar ──────────────────────────────────────────────────────── -->
+<div id="input-bar">
+  <div class="input-inner">
+    <textarea id="query-input"
+              placeholder="Ask a question about the news…"
+              rows="1"
+              disabled></textarea>
+    <button id="send-btn" disabled title="Send">&#9658;</button>
+  </div>
+  <p class="input-hint">Enter to send · Shift+Enter for new line</p>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────
+let pipelineReady = false;
+let isAsking      = false;
+
+// ── Pipeline health polling ────────────────────────────────────────────
+(function pollHealth() {
+  fetch('/health')
+    .then(r => r.json())
+    .then(data => {
+      if (data.ready) {
+        pipelineReady = true;
+        setStatus('ready', 'Pipeline ready');
+        document.getElementById('splash').classList.add('hidden');
+        document.getElementById('query-input').disabled = false;
+        document.getElementById('send-btn').disabled    = false;
+        document.getElementById('query-input').focus();
+      } else if (data.error) {
+        setStatus('error', 'Init failed');
+        document.getElementById('splash-msg').textContent = '⚠ ' + data.error;
+      } else {
+        const elapsed = data.elapsed ? ` (${data.elapsed}s)` : '';
+        document.getElementById('splash-msg').textContent =
+          'Loading FAISS index, BM25, and retrieval models…' + elapsed;
+        setTimeout(pollHealth, 1500);
+      }
+    })
+    .catch(() => setTimeout(pollHealth, 2000));
+})();
+
+function setStatus(state, label) {
+  const dot = document.getElementById('status-dot');
+  dot.className = 'status-dot ' + state;
+  document.getElementById('status-label').textContent = label;
+}
+
+// ── Auto-resize textarea ───────────────────────────────────────────────
+const input = document.getElementById('query-input');
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+});
+
+// ── Send on Enter (Shift+Enter = newline) ──────────────────────────────
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendQuery();
+  }
+});
+document.getElementById('send-btn').addEventListener('click', sendQuery);
+
+// ── Example query buttons ──────────────────────────────────────────────
+function setQuery(btn) {
+  input.value = btn.textContent.trim();
+  input.style.height = 'auto';
+  input.dispatchEvent(new Event('input'));
+  input.focus();
+}
+
+// ── Main send flow ─────────────────────────────────────────────────────
+function sendQuery() {
+  const query = input.value.trim();
+  if (!query || !pipelineReady || isAsking) return;
+
+  isAsking = true;
+  input.value = '';
+  input.style.height = 'auto';
+  document.getElementById('send-btn').disabled = true;
+
+  hideWelcome();
+  appendUserBubble(query);
+  const thinkingRow = appendThinkingBubble();
+  scrollToBottom();
+
+  fetch('/ask', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ query }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    thinkingRow.remove();
+    if (data.error) {
+      appendErrorBubble(data.error);
+    } else {
+      appendAnswerBubble(data);
+    }
+  })
+  .catch(err => {
+    thinkingRow.remove();
+    appendErrorBubble('Network error: ' + err.message);
+  })
+  .finally(() => {
+    isAsking = false;
+    document.getElementById('send-btn').disabled = false;
+    input.focus();
+    scrollToBottom();
+  });
+}
+
+// ── DOM helpers ────────────────────────────────────────────────────────
+function hideWelcome() {
+  const w = document.getElementById('welcome');
+  if (w) w.remove();
+}
+
+function scrollToBottom() {
+  const chat = document.getElementById('chat');
+  setTimeout(() => { chat.scrollTop = chat.scrollHeight; }, 50);
+}
+
+function appendUserBubble(text) {
+  const row = el('div', 'row user');
+  row.innerHTML = `
+    <div class="avatar">U</div>
+    <div class="bubble">${escHtml(text)}</div>`;
+  document.getElementById('chat-inner').appendChild(row);
+}
+
+function appendThinkingBubble() {
+  const row = el('div', 'row ai');
+  row.innerHTML = `
+    <div class="avatar">R</div>
+    <div class="bubble">
+      <div class="thinking-dots">
+        <span></span><span></span><span></span>
+      </div>
+      <div class="stage-progress" id="stage-msg">Retrieving from corpus…</div>
+    </div>`;
+  document.getElementById('chat-inner').appendChild(row);
+
+  // Animate stage messages
+  const stages = [
+    'Retrieving from corpus…',
+    'Running BM25 + FAISS search…',
+    'Reranking with Bi-Encoder…',
+    'Reranking with Cross-Encoder…',
+    'Generating answer…',
+  ];
+  let i = 0;
+  const stageMsg = row.querySelector('#stage-msg');
+  const timer = setInterval(() => {
+    i = (i + 1) % stages.length;
+    if (stageMsg) stageMsg.textContent = stages[i];
+  }, 2200);
+  row._clearTimer = () => clearInterval(timer);
+
+  return row;
+}
+
+function appendErrorBubble(msg) {
+  const row = el('div', 'row ai');
+  row.innerHTML = `
+    <div class="avatar">R</div>
+    <div class="bubble" style="border-left:3px solid var(--bad); color:var(--bad)">
+      ⚠ ${escHtml(msg)}
+    </div>`;
+  document.getElementById('chat-inner').appendChild(row);
+}
+
+function appendAnswerBubble(data) {
+  const row = el('div', 'row ai');
+
+  // Citations
+  const citesHtml = (data.citations || [])
+    .map(c => `<span class="cite-tag">${escHtml(shortId(c))}</span>`)
+    .join(' ');
+
+  // Fallback badge
+  const fallbackHtml = data.fallback
+    ? `<span class="badge fallback">⚠ Fallback</span>`
+    : '';
+
+  // Latency
+  const latHtml = data.latency_s
+    ? `<span class="badge latency">⏱ ${data.latency_s}s</span>`
+    : '';
+
+  row.innerHTML = `
+    <div class="avatar">R</div>
+    <div class="bubble">
+      <div class="answer-text">${escHtml(data.answer)}</div>
+
+      <div class="meta-bar">
+        ${fallbackHtml}
+        ${citesHtml}
+        ${latHtml}
+      </div>
+    </div>
+  `;
+
+  document.getElementById('chat-inner').appendChild(row);
+}
+
+function buildSources(retrieved, usedDocs) {
+  if (!retrieved || !retrieved.length) return '<p style="font-size:13px;color:var(--muted)">No sources.</p>';
+  const usedSet = new Set(usedDocs || []);
+  return retrieved.map((doc, i) => {
+    const used      = usedSet.has(doc.doc_id);
+    const cardClass = used ? 'source-card used' : 'source-card';
+    const rankClass = used ? 'source-rank used-doc' : 'source-rank';
+    const ce        = typeof doc.ce_score === 'number' ? doc.ce_score : null;
+    const ceClass   = ce !== null ? (ce > 0 ? 'ce-score good' : 'ce-score bad') : 'ce-score';
+    const ceLabel   = ce !== null ? `CE ${ce.toFixed(2)}` : '';
+    const title     = doc.title ? escHtml(doc.title.slice(0, 80)) : '—';
+    const text      = doc.chunk_text ? escHtml(doc.chunk_text.slice(0, 220)) + '…' : '—';
+    const rrf       = typeof doc.rrf_score === 'number' ? doc.rrf_score.toFixed(4) : '—';
+
+    return `
+      <div class="${cardClass}">
+        <div class="source-header">
+          <span class="${rankClass}">${used ? '✓ used' : `#${i+1}`}</span>
+          <span class="source-title">${title}</span>
+          ${ceLabel ? `<span class="${ceClass}">${ceLabel}</span>` : ''}
+        </div>
+        <div class="source-id">${escHtml(shortId(doc.doc_id))} · RRF ${rrf}</div>
+        <div class="source-text" style="margin-top:6px">${text}</div>
+      </div>`;
+  }).join('');
+}
+
+function toggleSources(btn) {
+  const panel = btn.closest('.bubble').querySelector('.sources-panel');
+  panel.classList.toggle('collapsed');
+  btn.classList.toggle('open');
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────
+function el(tag, cls) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  return e;
+}
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/\n/g, '<br>');
+}
+function shortId(id) {
+  if (!id) return '';
+  return id.length > 16 ? id.slice(0, 8) + '…' + id.slice(-4) : id;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,58 @@
+# ============================================================
+# RAG-NEWS Pipeline Dependencies
+# Python 3.10+ | RTX 3050 Ti 4GB VRAM
+# ============================================================
+
+# --- Core ML ---
+torch>=2.1.0                   # Install separately with CUDA: see README
+transformers>=4.38.0
+sentence-transformers>=2.6.0
+accelerate>=0.27.0
+datasets>=2.17.0
+safetensors>=0.4.2
+
+# --- BEIR ---
+beir>=2.0.0
+
+# --- Retrieval ---
+faiss-cpu>=1.7.4               # CPU FAISS (no GPU required)
+rank-bm25>=0.2.2
+
+# --- NLP Utilities ---
+nltk>=3.8.1
+
+# --- YAML / Config ---
+pyyaml>=6.0.1
+
+# --- Data / Utilities ---
+numpy>=1.26.0
+pandas>=2.1.0
+tqdm>=4.66.0
+scikit-learn>=1.4.0
+
+# --- Serialization ---
+pickle5>=0.0.11; python_version < "3.8"
+
+# --- HuggingFace Hub ---
+huggingface_hub>=0.21.0
+
+# --- Groq API (OpenAI-compatible) ---
+openai>=1.30.0                 # OpenAI SDK used as Groq client (compatible endpoint)
+httpx>=0.27.0                  # HTTP transport layer required by openai SDK
+python-dotenv>=1.0.0           # Load GROQ_API_KEY from .env
+
+# --- Web Server ---
+flask>=3.0.0
+
+# ============================================================
+# Installation Notes:
+#
+# 1. Install PyTorch with CUDA 12.1 first:
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+# 2. Then install everything else:
+#    pip install -r requirements.txt
+#
+# 3. Download NLTK tokenizer data (run once):
+#    python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); nltk.download('stopwords')"
+# ============================================================
