@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--ratio", type=float, default=0.5, help="Sampling ratio")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--model_name", default="sentence-transformers/all-MiniLM-L6-v2", help="Encoder model")
+    parser.add_argument("--build-training-datasets", action="store_true", help="Also generate training triplets for bi-/cross-encoder training")
     
     args = parser.parse_args()
     
@@ -85,12 +86,16 @@ def main():
     else:
         logger.info(f"Skipping FAISS indexing, found {faiss_path}")
     
-    # 7. Training Datasets
-    train_dataset_path = os.path.join(args.output_dir, "train.jsonl")
-    if not os.path.exists(train_dataset_path):
-        build_training_datasets(args.output_dir)
+    # 7. Training Datasets (optional; heavy and only needed for model training)
+    if args.build_training_datasets:
+        train_dataset_path = os.path.join(args.output_dir, "train.jsonl")
+        if not os.path.exists(train_dataset_path):
+            logger.info("Building optional training datasets because --build-training-datasets was requested.")
+            build_training_datasets(args.output_dir)
+        else:
+            logger.info(f"Skipping training datasets builder, found {train_dataset_path}")
     else:
-        logger.info(f"Skipping training datasets builder, found {train_dataset_path}")
+        logger.info("Skipping optional training dataset generation for faster demo/index builds.")
         
     logger.info("Pipeline Execution Completed Successfully.")
 

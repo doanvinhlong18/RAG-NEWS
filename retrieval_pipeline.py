@@ -33,9 +33,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple
 
+from duckdb import query
+from importlib_metadata import metadata
 import yaml
 import numpy as np
 
+from data_pipeline.utils import tokenize_for_bm25
 from multi_query_retriever import (
     QueryIntentClassifier,
     expand_query_with_intent,
@@ -244,7 +247,7 @@ class HybridRetriever:
         """Returns list of (chunk_id, bm25_score) sorted desc."""
         from data_pipeline.utils import tokenize_for_bm25
         bm25     = self._get_bm25()
-        self._get_metadata()
+        metadata = self._get_metadata()  # thêm gán biến
         stops    = self._get_stop_words()
 
         toks   = tokenize_for_bm25(query, stops)
@@ -322,12 +325,12 @@ class HybridRetriever:
 
         return sorted(rrf.items(), key=lambda x: -x[1])
 
-    # ── Public: Retrieve ─────────────────────────────────────────────────────
+# ── Public: Retrieve ─────────────────────────────────────────────────────
 
     def retrieve(
-        self,
-        queries: List[str],
-        return_full_chunks: bool = True,
+            self,
+            queries: List[str],
+            return_full_chunks: bool = True,
     ) -> List[Dict]:
         """
         Hybrid retrieval for a list of query variants.
@@ -598,6 +601,9 @@ class RetrievalPipeline:
         if verbose:
             logger.info(f"Intent: {intent} | Query variants: {queries}")
 
+        print(type(self.hybrid))
+        print(dir(self.hybrid)) 
+        
         # Stage 1: Hybrid retrieval (BM25 + Dense → RRF)
         t_stage = time.time()
         candidates = self.hybrid.retrieve(queries)
