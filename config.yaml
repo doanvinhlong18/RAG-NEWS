@@ -41,8 +41,8 @@ generator:
   provider: "groq"
   primary_model: "llama-3.3-70b-versatile"
   fallback_models:
-    - "qwen-qwq-32b"
-    - "mixtral-8x7b-32768"
+  - "qwen/qwen3-32b"
+  - "llama-3.1-8b-instant"
   temperature: 0.1
   top_p: 0.9
   max_tokens: 256

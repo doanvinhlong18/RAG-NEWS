@@ -1,0 +1,88 @@
+{
+  "qwen": {
+    "model": "qwen/qwen3-32b",
+    "queries": [
+      {
+        "query": "Who won the 2016 US election?",
+        "answer": "<think>\nOkay, the user is asking who won the 2016 US election. Let me check the provided contexts. Looking at Context 2, it mentions that Hillary Clinton was predicted to win based on historical trends, but the actual result might be different. However, Context 1 and Context 3 don't mention the 2016 result directly.",
+        "latency_retrieval_s": 16.51,
+        "latency_llm_s": 0,
+        "latency_total_s": 22.974
+      },
+      {
+        "query": "Who is Elon Musk?",
+        "answer": "<think>\nOkay, let's tackle this. The user is asking \"Who is Elon Musk?\" I need to use the provided contexts to form a concise answer. First, looking at Context 1: Elon Musk is the CEO of Tesla and SpaceX, also chairman of SolarCity's board and its largest shareholder. His cousin Lyndon Rive is SolarCity's CEO.",
+        "latency_retrieval_s": 0.452,
+        "latency_llm_s": 0,
+        "latency_total_s": 1.75
+      },
+      {
+        "query": "What caused the 2008 financial crisis?",
+        "answer": "<think>\nOkay, the user is asking what caused the 2008 financial crisis. Let me look through the provided contexts to find the explicit causes mentioned. In Context 1, Bannon attributes the crisis to Wall Street's focus on maximizing profits, financialization, and the bailouts by Henry Paulson. He mentions that bankers' profits were prioritized over everyday investors.",
+        "latency_retrieval_s": 0.268,
+        "latency_llm_s": 0,
+        "latency_total_s": 1.385
+      },
+      {
+        "query": "What is SpaceX?",
+        "answer": "<think>\nOkay, the user is asking \"What is SpaceX?\" I need to synthesize the information from the provided contexts to answer this. Let me go through each context to gather relevant points. From Context 1: SpaceX is a commercial spaceflight company founded by Elon Musk. They launch rockets for commercial satellites, deliver cargo to the ISS for NASA, and have contracts to transport humans.",
+        "latency_retrieval_s": 0.247,
+        "latency_llm_s": 0,
+        "latency_total_s": 1.365
+      },
+      {
+        "query": "Who is Hillary Clinton?",
+        "answer": "<think>\nOkay, the user is asking \"Who is Hillary Clinton?\" I need to answer this using the provided contexts. Let me go through each context to gather relevant information. From Context 1: Hillary Clinton is a former Secretary of State, former Senator, and First Lady. She's a second-wave feminist, educated at Wellesley and Yale Law.",
+        "latency_retrieval_s": 0.26,
+        "latency_llm_s": 0,
+        "latency_total_s": 1.369
+      }
+    ],
+    "avg_retrieval_s": 3.547,
+    "avg_llm_s": 0.0,
+    "avg_total_s": 5.769
+  },
+  "llama": {
+    "model": "llama-3.3-70b-versatile",
+    "queries": [
+      {
+        "query": "Who won the 2016 US election?",
+        "answer": "The context does not explicitly state the winner of the 2016 US election, but it implies that Hillary Clinton was expected to win. However, historical records show that Donald Trump won the 2016 US presidential election, but this information is not present in the provided context.",
+        "latency_retrieval_s": 20.941,
+        "latency_llm_s": 0,
+        "latency_total_s": 27.926
+      },
+      {
+        "query": "Who is Elon Musk?",
+        "answer": "Elon Musk is the Chief Executive of SpaceX and Tesla, and the Chairman of SolarCity's board. He is also a billionaire entrepreneur and the founder of technology firms, known for his unscripted style and workaholic nature. Musk holds various roles, including being the largest shareholder of SolarCity.",
+        "latency_retrieval_s": 0.496,
+        "latency_llm_s": 0,
+        "latency_total_s": 1.308
+      },
+      {
+        "query": "What caused the 2008 financial crisis?",
+        "answer": "The 2008 financial crisis was caused by factors including the financialization of Wall Street, where bankers' profits were prioritized over those of everyday investors, and reckless risks taken by large financial institutions. Additionally, financial deregulation of the 1990s and 80s, lax government regulation, and the government's aggressive promotion of homeownership, which eroded mortgage lending standards and created the housing bubble, also contributed to the crisis.",
+        "latency_retrieval_s": 0.317,
+        "latency_llm_s": 0,
+        "latency_total_s": 1.197
+      },
+      {
+        "query": "What is SpaceX?",
+        "answer": "SpaceX is a commercial spaceflight company founded by billionaire technology executive Elon Musk. It is one of the world's premier space flight companies, launching rockets to ferry commercial satellites into orbit around the Earth, delivering cargo to the International Space Station, and aiming to transport humans to the space station and eventually to Mars.",
+        "latency_retrieval_s": 0.261,
+        "latency_llm_s": 0,
+        "latency_total_s": 0.93
+      },
+      {
+        "query": "Who is Hillary Clinton?",
+        "answer": "Hillary Clinton is a former Secretary of State, former Senator, and former First Lady. She is a second-wave feminist who attended Wellesley College and Yale Law School. Clinton is also a former presidential candidate who has been involved in various political endeavors, including a contentious effort to create a national healthcare system during her husband's presidency.",
+        "latency_retrieval_s": 0.271,
+        "latency_llm_s": 0,
+        "latency_total_s": 1.109
+      }
+    ],
+    "avg_retrieval_s": 4.457,
+    "avg_llm_s": 0.0,
+    "avg_total_s": 6.494
+  }
+}
